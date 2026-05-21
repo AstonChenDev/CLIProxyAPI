@@ -333,6 +333,57 @@ func collectXAIImagesFromJSON(rawJSON []byte) []string {
 	return images
 }
 
+func collectImagesFromJSON(rawJSON []byte) []string {
+	var images []string
+	appendImage := func(url string) {
+		url = strings.TrimSpace(url)
+		if url != "" {
+			images = append(images, url)
+		}
+	}
+
+	// 1. Check "image" field
+	if image := gjson.GetBytes(rawJSON, "image"); image.Exists() {
+		if image.Type == gjson.String {
+			appendImage(image.String())
+		} else if image.Type == gjson.JSON {
+			if url := image.Get("url"); url.Type == gjson.String {
+				appendImage(url.String())
+			} else if imageUrl := image.Get("image_url"); imageUrl.Exists() {
+				if imageUrl.Type == gjson.String {
+					appendImage(imageUrl.String())
+				} else if imageUrl.Type == gjson.JSON {
+					if u := imageUrl.Get("url"); u.Type == gjson.String {
+						appendImage(u.String())
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Check "images" field
+	if imagesResult := gjson.GetBytes(rawJSON, "images"); imagesResult.IsArray() {
+		for _, img := range imagesResult.Array() {
+			if img.Type == gjson.String {
+				appendImage(img.String())
+			} else if img.Type == gjson.JSON {
+				if url := img.Get("url"); url.Type == gjson.String {
+					appendImage(url.String())
+				} else if imageUrl := img.Get("image_url"); imageUrl.Exists() {
+					if imageUrl.Type == gjson.String {
+						appendImage(imageUrl.String())
+					} else if imageUrl.Type == gjson.JSON {
+						if u := imageUrl.Get("url"); u.Type == gjson.String {
+							appendImage(u.String())
+						}
+					}
+				}
+			}
+		}
+	}
+	return images
+}
+
 func xaiImagesEditOptionsFromJSON(rawJSON []byte) (aspectRatio string, resolution string, n int64) {
 	size := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String())
 	aspectRatio = xaiImagesAspectRatio(gjson.GetBytes(rawJSON, "aspect_ratio").String(), "")
@@ -598,7 +649,8 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		tool, _ = sjson.SetBytes(tool, "moderation", v)
 	}
 
-	responsesReq := buildImagesResponsesRequest(prompt, nil, tool)
+	images := collectImagesFromJSON(rawJSON)
+	responsesReq := buildImagesResponsesRequest(prompt, images, tool)
 	if stream {
 		h.streamImagesFromResponses(c, responsesReq, responseFormat, "image_generation")
 		return
@@ -867,21 +919,11 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		return
 	}
 
-	var images []string
-	imagesResult := gjson.GetBytes(rawJSON, "images")
-	if imagesResult.IsArray() {
-		for _, img := range imagesResult.Array() {
-			url := strings.TrimSpace(img.Get("image_url").String())
-			if url == "" {
-				continue
-			}
-			images = append(images, url)
-		}
-	}
+	images := collectImagesFromJSON(rawJSON)
 	if len(images) == 0 {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
-				Message: "Invalid request: images[].image_url is required (file_id is not supported)",
+				Message: "Invalid request: image or images[].image_url is required (file_id is not supported)",
 				Type:    "invalid_request_error",
 			},
 		})
@@ -889,19 +931,42 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	}
 
 	var maskDataURL *string
-	if mask := gjson.GetBytes(rawJSON, "mask.image_url"); mask.Exists() {
-		url := strings.TrimSpace(mask.String())
-		if url != "" {
-			maskDataURL = &url
+	if mask := gjson.GetBytes(rawJSON, "mask"); mask.Exists() {
+		if mask.Type == gjson.String {
+			url := strings.TrimSpace(mask.String())
+			if url != "" {
+				maskDataURL = &url
+			}
+		} else if mask.Type == gjson.JSON {
+			if url := mask.Get("url"); url.Type == gjson.String {
+				u := strings.TrimSpace(url.String())
+				if u != "" {
+					maskDataURL = &u
+				}
+			} else if imageUrl := mask.Get("image_url"); imageUrl.Exists() {
+				if imageUrl.Type == gjson.String {
+					u := strings.TrimSpace(imageUrl.String())
+					if u != "" {
+						maskDataURL = &u
+					}
+				} else if imageUrl.Type == gjson.JSON {
+					if u := imageUrl.Get("url"); u.Type == gjson.String {
+						urlStr := strings.TrimSpace(u.String())
+						if urlStr != "" {
+							maskDataURL = &urlStr
+						}
+					}
+				}
+			} else if mask.Get("file_id").Exists() {
+				c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+					Error: handlers.ErrorDetail{
+						Message: "Invalid request: mask.file_id is not supported (use mask/mask.image_url instead)",
+						Type:    "invalid_request_error",
+					},
+				})
+				return
+			}
 		}
-	} else if mask := gjson.GetBytes(rawJSON, "mask.file_id"); mask.Exists() {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: "Invalid request: mask.file_id is not supported (use mask.image_url instead)",
-				Type:    "invalid_request_error",
-			},
-		})
-		return
 	}
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)

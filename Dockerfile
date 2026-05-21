@@ -1,4 +1,4 @@
-FROM golang:1.26-alpine AS builder
+FROM docker.m.daocloud.io/library/golang:1.26-alpine AS builder
 
 WORKDIR /app
 
@@ -14,7 +14,7 @@ ARG BUILD_DATE=unknown
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o ./CLIProxyAPI ./cmd/server/
 
-FROM alpine:3.23
+FROM docker.m.daocloud.io/library/alpine:3.23
 
 RUN apk add --no-cache tzdata
 

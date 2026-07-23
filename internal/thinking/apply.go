@@ -414,13 +414,14 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractClaudeConfig(body)
 	case "gemini", "antigravity":
 		return extractGeminiConfig(body, provider)
+	case "interactions":
+		return extractInteractionsConfig(body)
 	case "openai":
 		return extractOpenAIConfig(body)
 	case "codex", "xai":
 		return extractCodexConfig(body)
 	case "kimi":
-		// Kimi uses OpenAI-compatible reasoning_effort format
-		return extractOpenAIConfig(body)
+		return extractKimiConfig(body)
 	default:
 		return ThinkingConfig{}
 	}
@@ -608,6 +609,56 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 	return ThinkingConfig{}
 }
 
+func extractInteractionsConfig(body []byte) ThinkingConfig {
+	for _, path := range []string{
+		"generation_config.thinking_level",
+		"generation_config.thinkingLevel",
+		"generation_config.thinking_config.thinking_level",
+		"generation_config.thinking_config.thinkingLevel",
+		"generation_config.thinkingConfig.thinking_level",
+		"generation_config.thinkingConfig.thinkingLevel",
+	} {
+		level := gjson.GetBytes(body, path)
+		if !level.Exists() {
+			continue
+		}
+		value := strings.ToLower(strings.TrimSpace(level.String()))
+		switch value {
+		case "none":
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case "auto":
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+		default:
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
+	for _, path := range []string{
+		"generation_config.thinking_budget",
+		"generation_config.thinkingBudget",
+		"generation_config.thinking_config.thinking_budget",
+		"generation_config.thinking_config.thinkingBudget",
+		"generation_config.thinkingConfig.thinking_budget",
+		"generation_config.thinkingConfig.thinkingBudget",
+	} {
+		budget := gjson.GetBytes(body, path)
+		if !budget.Exists() {
+			continue
+		}
+		value := int(budget.Int())
+		switch value {
+		case 0:
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case -1:
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+		default:
+			return ThinkingConfig{Mode: ModeBudget, Budget: value}
+		}
+	}
+
+	return ThinkingConfig{}
+}
+
 // extractOpenAIConfig extracts thinking configuration from OpenAI format request body.
 //
 // OpenAI API format:
@@ -626,6 +677,50 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 	}
 
 	return ThinkingConfig{}
+}
+
+// extractKimiConfig extracts Kimi's native thinking object while retaining
+// reasoning_effort as a legacy input fallback.
+//
+// Native fields take precedence over reasoning_effort. In particular,
+// thinking.type="enabled" without an explicit effort means "use the upstream
+// default" and therefore returns an empty config so ApplyThinking preserves the
+// request unchanged instead of interpreting it as CPA's ModeAuto.
+func extractKimiConfig(body []byte) ThinkingConfig {
+	thinkingType := gjson.GetBytes(body, "thinking.type")
+	if thinkingType.Exists() {
+		switch strings.ToLower(strings.TrimSpace(thinkingType.String())) {
+		case "disabled":
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case "enabled":
+			if !gjson.GetBytes(body, "thinking.effort").Exists() {
+				return ThinkingConfig{}
+			}
+		}
+	}
+
+	if effort := gjson.GetBytes(body, "thinking.effort"); effort.Exists() {
+		value := strings.ToLower(strings.TrimSpace(effort.String()))
+		switch value {
+		case "":
+			return ThinkingConfig{}
+		case "none":
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case "auto":
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+		default:
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
+	// An explicit native thinking object without an effort should be left for
+	// the Kimi upstream to interpret and must not be overridden by the legacy
+	// field.
+	if thinkingType.Exists() {
+		return ThinkingConfig{}
+	}
+
+	return extractOpenAIConfig(body)
 }
 
 // extractCodexConfig extracts thinking configuration from Codex format request body.

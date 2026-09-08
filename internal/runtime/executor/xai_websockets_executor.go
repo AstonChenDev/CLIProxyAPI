@@ -583,6 +583,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		readCh = sess.activate(conn)
 	}
 
+	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		errSend = mapXAIWebsocketWriteError(sess, conn, errSend)
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
@@ -639,6 +640,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			logXAIWebsocketRequest(executionSessionID, authID, wsURL, wsReqBodyRetry)
 			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
 			reporter.StartResponseTTFT()
+			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 			if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry != nil {
 				errSendRetry = mapXAIWebsocketWriteError(sess, connRetry, errSendRetry)
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
@@ -868,23 +870,52 @@ func (e *XAIWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(ctx
 		return nil, statusErr{code: http.StatusBadRequest, msg: "xai websocket compaction context is unavailable"}
 	}
 	transcriptInput := idMapper.state.snapshotTranscriptInput()
-	if len(transcriptInput) == 0 {
-		return nil, statusErr{code: http.StatusBadRequest, msg: "xai websocket compaction context is empty"}
+	var compactPayload []byte
+	var inputItemsCount int
+	keepPreviousResponseID := false
+	if len(transcriptInput) > 0 {
+		var errBuild error
+		compactPayload, errBuild = buildXAIWebsocketCompactionPayload(req.Payload, transcriptInput)
+		if errBuild != nil {
+			return nil, errBuild
+		}
+		inputItemsCount = len(gjson.ParseBytes(transcriptInput).Array())
+	} else {
+		filteredPayload := xaiRemoveInputItemsByType(req.Payload, "compaction_trigger")
+		payloadInput := gjson.GetBytes(filteredPayload, "input")
+		if payloadInput.IsArray() && len(payloadInput.Array()) > 0 {
+			var errBuild error
+			compactPayload, errBuild = buildXAIWebsocketCompactionPayload(filteredPayload, []byte(payloadInput.Raw))
+			if errBuild != nil {
+				return nil, errBuild
+			}
+			inputItemsCount = len(payloadInput.Array())
+		} else {
+			prevID := idMapper.upstreamPreviousID
+			if prevID == "" {
+				prevID = strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String())
+			}
+			if prevID != "" {
+				keepPreviousResponseID = true
+				compactPayload = bytes.Clone(req.Payload)
+				compactPayload = xaiRemoveInputItemsByType(compactPayload, "compaction_trigger")
+				compactPayload, _ = sjson.SetBytes(compactPayload, "previous_response_id", prevID)
+			} else {
+				return nil, statusErr{code: http.StatusBadRequest, msg: "xai websocket compaction context is empty"}
+			}
+		}
 	}
 	authID := ""
 	if auth != nil {
 		authID = auth.ID
 	}
 	log.Infof(
-		"xai websockets: compact fallback session=%s auth=%s input_items=%d",
+		"xai websockets: compact fallback session=%s auth=%s input_items=%d keep_previous_response_id=%t",
 		xaiExecutionSessionID(req, opts),
 		strings.TrimSpace(authID),
-		len(gjson.ParseBytes(transcriptInput).Array()),
+		inputItemsCount,
+		keepPreviousResponseID,
 	)
-	compactPayload, err := buildXAIWebsocketCompactionPayload(req.Payload, transcriptInput)
-	if err != nil {
-		return nil, err
-	}
 	compactReq := req
 	compactReq.Payload = compactPayload
 
@@ -1050,6 +1081,9 @@ func (e *XAIWebsocketsExecutor) dialXAIWebsocket(ctx context.Context, auth *clip
 		ctx = context.Background()
 	}
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	if err != nil {
+		cliproxyexecutor.MarkUpstreamAttempt(ctx)
+	}
 	closer := newWebsocketConnectionCloser(conn)
 	if conn != nil {
 		// Avoid gorilla/websocket flate tail validation issues on some upstreams/Go versions.

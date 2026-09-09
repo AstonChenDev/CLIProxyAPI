@@ -38,6 +38,48 @@ func codexOpenAIImageTestOptions(path string, stream bool) cliproxyexecutor.Opti
 	}
 }
 
+func TestCodexIsDirectOpenAIImageModelSupportsGPTImage25Variants(t *testing.T) {
+	for _, model := range []string{
+		"gpt-image-2.5-flare",
+		"codex/gpt-image-2.5-flare",
+		"gpt-image-2.5-sunburst",
+		"codex/gpt-image-2.5-sunburst",
+	} {
+		if baseModel := codexOpenAIImageBaseModel(model); !codexIsDirectOpenAIImageModel(baseModel) {
+			t.Errorf("model %q normalized to %q, want direct image support", model, baseModel)
+		}
+	}
+}
+
+func TestCodexPrepareDirectOpenAIImageBodyPreservesGPTImage25Options(t *testing.T) {
+	for _, model := range []string{codexGPTImage25FlareModel, codexGPTImage25SunburstModel} {
+		t.Run(model, func(t *testing.T) {
+			body, contentType, gotModel, errPrepare := codexPrepareDirectOpenAIImageBody(cliproxyexecutor.Request{
+				Model:   model,
+				Payload: []byte(`{"model":"` + model + `","prompt":"draw","quality":"max","size":"1536x1024","stream":false}`),
+			}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false), false)
+			if errPrepare != nil {
+				t.Fatalf("codexPrepareDirectOpenAIImageBody() error = %v", errPrepare)
+			}
+			if contentType != "application/json" {
+				t.Fatalf("content type = %q, want application/json", contentType)
+			}
+			if gotModel != model || gjson.GetBytes(body, "model").String() != model {
+				t.Fatalf("model = %q body model = %q, want %q", gotModel, gjson.GetBytes(body, "model").String(), model)
+			}
+			if quality := gjson.GetBytes(body, "quality").String(); quality != "max" {
+				t.Fatalf("quality = %q, want max", quality)
+			}
+			if size := gjson.GetBytes(body, "size").String(); size != "1536x1024" {
+				t.Fatalf("size = %q, want 1536x1024", size)
+			}
+			if gjson.GetBytes(body, "stream").Exists() {
+				t.Fatalf("stream should be omitted from non-streaming request: %s", string(body))
+			}
+		})
+	}
+}
+
 func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T) {
 	var gotPath string
 	var gotAuth string

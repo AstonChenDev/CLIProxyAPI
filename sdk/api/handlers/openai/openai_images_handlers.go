@@ -37,6 +37,9 @@ const (
 	xaiImagesHandlerType        = "openai-image"
 	xaiImagesDefaultAspectRatio = "1:1"
 	xaiImagesDefaultResolution  = "1k"
+	maxOpenAIImagePromptChars   = 32_000
+	maxOpenAIImageModelChars    = 128
+	maxOpenAIImageCount         = 4
 	imagesGenerationsPath       = "/v1/images/generations"
 	imagesEditsPath             = "/v1/images/edits"
 )
@@ -308,10 +311,250 @@ func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {
 }
 
 func normalizeImagesResponseFormat(responseFormat string) string {
-	if strings.EqualFold(strings.TrimSpace(responseFormat), "url") {
-		return "url"
+	if strings.TrimSpace(responseFormat) == "" || strings.EqualFold(strings.TrimSpace(responseFormat), "b64_json") {
+		return "b64_json"
 	}
-	return "b64_json"
+	return "url"
+}
+
+type openAIImageReferenceInfo struct {
+	Count      int
+	HasFileID  bool
+	HasInvalid bool
+}
+
+func collectOpenAIImageReference(value gjson.Result, info *openAIImageReferenceInfo) {
+	if info == nil || !value.Exists() {
+		return
+	}
+	if value.IsArray() {
+		for _, item := range value.Array() {
+			collectOpenAIImageReference(item, info)
+		}
+		return
+	}
+	if value.IsObject() {
+		if strings.TrimSpace(value.Get("file_id").String()) != "" {
+			info.HasFileID = true
+			return
+		}
+		if imageURL := value.Get("image_url"); imageURL.Exists() {
+			collectOpenAIImageReference(imageURL, info)
+			return
+		}
+		for _, key := range []string{"url", "b64_json", "base64"} {
+			if ref := strings.TrimSpace(value.Get(key).String()); ref != "" {
+				info.Count++
+				return
+			}
+		}
+		info.HasInvalid = true
+		return
+	}
+	if ref := strings.TrimSpace(value.String()); ref != "" {
+		info.Count++
+	}
+}
+
+func openAIImageReferenceInfoFromJSON(rawJSON []byte, keys ...string) openAIImageReferenceInfo {
+	info := openAIImageReferenceInfo{}
+	for _, key := range keys {
+		collectOpenAIImageReference(gjson.GetBytes(rawJSON, key), &info)
+	}
+	return info
+}
+
+func writeImagesValidationError(c *gin.Context, message string) {
+	c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		Error: handlers.ErrorDetail{Message: message, Type: "invalid_request_error"},
+	})
+}
+
+func validateOpenAIImageCommonFields(c *gin.Context, rawJSON []byte) bool {
+	model := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if len(model) > maxOpenAIImageModelChars {
+		writeImagesValidationError(c, fmt.Sprintf("Invalid request: model must not exceed %d characters", maxOpenAIImageModelChars))
+		return false
+	}
+	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
+	if len(prompt) > maxOpenAIImagePromptChars {
+		writeImagesValidationError(c, fmt.Sprintf("Invalid request: prompt must not exceed %d characters", maxOpenAIImagePromptChars))
+		return false
+	}
+	if count := gjson.GetBytes(rawJSON, "n"); count.Exists() {
+		if count.Type != gjson.Number {
+			writeImagesValidationError(c, "Invalid request: n must be an integer")
+			return false
+		}
+		parsed, errParse := strconv.Atoi(strings.TrimSpace(count.Raw))
+		if errParse != nil || parsed < 1 || parsed > maxOpenAIImageCount {
+			writeImagesValidationError(c, "Invalid request: n must be between 1 and 4")
+			return false
+		}
+	}
+	return true
+}
+
+func validateOpenAIImageEditReferences(c *gin.Context, rawJSON []byte) bool {
+	info := openAIImageReferenceInfoFromJSON(rawJSON, "images", "image", "image_url")
+	if info.HasFileID {
+		writeImagesValidationError(c, "Invalid request: file_id image references are not supported; use image_url instead")
+		return false
+	}
+	if info.HasInvalid || info.Count == 0 {
+		writeImagesValidationError(c, "Invalid request: image reference must include image_url")
+		return false
+	}
+	if info.Count > maxOpenAIImageCount {
+		writeImagesValidationError(c, "Invalid request: an image edit request may contain at most 4 images")
+		return false
+	}
+	return true
+}
+
+func validateOpenAIImageGenerationReferences(c *gin.Context, rawJSON []byte) bool {
+	info := openAIImageReferenceInfoFromJSON(rawJSON, "image", "images", "image_url")
+	if info.HasFileID || info.HasInvalid {
+		writeImagesValidationError(c, "Invalid request: image references must be strings or image_url values")
+		return false
+	}
+	if info.Count > maxOpenAIImageCount {
+		writeImagesValidationError(c, "Invalid request: a generation request may contain at most 4 input images")
+		return false
+	}
+	return true
+}
+
+func validateOpenAIImageMultipartFields(c *gin.Context, form *multipart.Form, requireImages bool) bool {
+	model := strings.TrimSpace(c.PostForm("model"))
+	if len(model) > maxOpenAIImageModelChars {
+		writeImagesValidationError(c, fmt.Sprintf("Invalid request: model must not exceed %d characters", maxOpenAIImageModelChars))
+		return false
+	}
+	prompt := strings.TrimSpace(c.PostForm("prompt"))
+	if len(prompt) > maxOpenAIImagePromptChars {
+		writeImagesValidationError(c, fmt.Sprintf("Invalid request: prompt must not exceed %d characters", maxOpenAIImagePromptChars))
+		return false
+	}
+	if rawCount := strings.TrimSpace(c.PostForm("n")); rawCount != "" {
+		count, errParse := strconv.Atoi(rawCount)
+		if errParse != nil || count < 1 || count > maxOpenAIImageCount {
+			writeImagesValidationError(c, "Invalid request: n must be between 1 and 4")
+			return false
+		}
+	}
+	if !requireImages {
+		return true
+	}
+	info := openAIImageReferenceInfo{}
+	for _, key := range []string{"image", "image[]", "images", "images[]", "image_url", "image_url[]"} {
+		for _, value := range form.Value[key] {
+			trimmed := strings.TrimSpace(value)
+			if (strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{")) && json.Valid([]byte(trimmed)) {
+				collectOpenAIImageReference(gjson.Parse(trimmed), &info)
+			} else if trimmed != "" {
+				info.Count++
+			}
+		}
+		info.Count += len(form.File[key])
+	}
+	for _, key := range []string{"mask", "mask[]"} {
+		for _, value := range form.Value[key] {
+			trimmed := strings.TrimSpace(value)
+			if (strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{")) && json.Valid([]byte(trimmed)) {
+				var maskInfo openAIImageReferenceInfo
+				collectOpenAIImageReference(gjson.Parse(trimmed), &maskInfo)
+				if maskInfo.HasFileID {
+					info.HasFileID = true
+				}
+			}
+		}
+	}
+	if info.HasFileID {
+		writeImagesValidationError(c, "Invalid request: file_id image references are not supported; use image_url instead")
+		return false
+	}
+	if info.Count == 0 {
+		writeImagesValidationError(c, "Invalid request: image is required")
+		return false
+	}
+	if info.Count > maxOpenAIImageCount {
+		writeImagesValidationError(c, "Invalid request: an image edit request may contain at most 4 images")
+		return false
+	}
+	return true
+}
+
+func collectOpenAIImageMultipartReferences(form *multipart.Form) []string {
+	if form == nil {
+		return nil
+	}
+	refs := make([]string, 0)
+	var appendValue func(gjson.Result)
+	appendValue = func(value gjson.Result) {
+		if !value.Exists() {
+			return
+		}
+		if value.IsArray() {
+			for _, item := range value.Array() {
+				appendValue(item)
+			}
+			return
+		}
+		if value.IsObject() {
+			if imageURL := value.Get("image_url"); imageURL.Exists() {
+				appendValue(imageURL)
+				return
+			}
+			for _, key := range []string{"url", "b64_json", "base64"} {
+				if ref := strings.TrimSpace(value.Get(key).String()); ref != "" {
+					refs = append(refs, ref)
+					return
+				}
+			}
+			return
+		}
+		if ref := strings.TrimSpace(value.String()); ref != "" {
+			refs = append(refs, ref)
+		}
+	}
+	for _, key := range []string{"image", "image[]", "images", "images[]", "image_url", "image_url[]"} {
+		for _, value := range form.Value[key] {
+			trimmed := strings.TrimSpace(value)
+			if (strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{")) && json.Valid([]byte(trimmed)) {
+				appendValue(gjson.Parse(trimmed))
+			} else if trimmed != "" {
+				refs = append(refs, trimmed)
+			}
+		}
+	}
+	return refs
+}
+
+func firstOpenAIImageReference(value gjson.Result) string {
+	if !value.Exists() {
+		return ""
+	}
+	if value.IsArray() {
+		for _, item := range value.Array() {
+			if ref := firstOpenAIImageReference(item); ref != "" {
+				return ref
+			}
+		}
+		return ""
+	}
+	if value.IsObject() {
+		if nested := value.Get("image_url"); nested.Exists() {
+			return firstOpenAIImageReference(nested)
+		}
+		for _, key := range []string{"url", "b64_json", "base64"} {
+			if ref := strings.TrimSpace(value.Get(key).String()); ref != "" {
+				return ref
+			}
+		}
+		return ""
+	}
+	return strings.TrimSpace(value.String())
 }
 
 func canonicalXAIImagesModel(model string) string {
@@ -663,6 +906,9 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		})
 		return
 	}
+	if !validateOpenAIImageCommonFields(c, rawJSON) || !validateOpenAIImageGenerationReferences(c, rawJSON) {
+		return
+	}
 
 	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
 	if imageModel == "" {
@@ -780,7 +1026,6 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		})
 		return
 	}
-
 	imageModel := strings.TrimSpace(c.PostForm("model"))
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
@@ -789,6 +1034,9 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		return
 	}
 	if rejectUnsupportedGPTImage25Edit(c, imageModel) {
+		return
+	}
+	if !validateOpenAIImageMultipartFields(c, form, false) {
 		return
 	}
 
@@ -802,14 +1050,16 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		})
 		return
 	}
+	if !validateOpenAIImageMultipartFields(c, form, true) {
+		return
+	}
 
 	var imageFiles []*multipart.FileHeader
-	if files := form.File["image[]"]; len(files) > 0 {
-		imageFiles = files
-	} else if files := form.File["image"]; len(files) > 0 {
-		imageFiles = files
+	for _, key := range []string{"image", "image[]", "images", "images[]", "image_url", "image_url[]"} {
+		imageFiles = append(imageFiles, form.File[key]...)
 	}
-	if len(imageFiles) == 0 {
+	textImageRefs := collectOpenAIImageMultipartReferences(form)
+	if len(imageFiles) == 0 && len(textImageRefs) == 0 {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: "Invalid request: image is required",
@@ -819,7 +1069,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		return
 	}
 
-	images := make([]string, 0, len(imageFiles))
+	images := make([]string, 0, len(imageFiles)+len(textImageRefs))
+	images = append(images, textImageRefs...)
 	for _, fh := range imageFiles {
 		dataURL, err := multipartFileToDataURL(fh)
 		if err != nil {
@@ -897,6 +1148,28 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		}
 		maskDataURL = &dataURL
 	}
+	if maskDataURL == nil {
+		for _, key := range []string{"mask", "mask[]"} {
+			for _, value := range form.Value[key] {
+				trimmed := strings.TrimSpace(value)
+				if trimmed == "" {
+					continue
+				}
+				if (strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{")) && json.Valid([]byte(trimmed)) {
+					trimmed = firstOpenAIImageReference(gjson.Parse(trimmed))
+				}
+				if trimmed != "" {
+					maskDataURL = &trimmed
+				}
+				if maskDataURL != nil {
+					break
+				}
+			}
+			if maskDataURL != nil {
+				break
+			}
+		}
+	}
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
@@ -957,6 +1230,9 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 				Type:    "invalid_request_error",
 			},
 		})
+		return
+	}
+	if !validateOpenAIImageCommonFields(c, rawJSON) || !validateOpenAIImageEditReferences(c, rawJSON) {
 		return
 	}
 

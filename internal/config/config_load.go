@@ -12,6 +12,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func newOptionalConfig() *Config {
+	cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+	cfg.ImageStorage.ApplyEnvironmentOverrides()
+	cfg.NormalizePluginsConfig()
+	return cfg
+}
+
 // LoadConfig reads a YAML configuration file from the given path,
 // unmarshals it into a Config struct, applies environment variable overrides,
 // and returns it.
@@ -36,9 +43,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
 				// Missing and optional: return empty config (cloud deploy standby).
-				cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-				cfg.NormalizePluginsConfig()
-				return cfg, nil
+				return newOptionalConfig(), nil
 			}
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
@@ -46,16 +51,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
-		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-		cfg.NormalizePluginsConfig()
-		return cfg, nil
+		return newOptionalConfig(), nil
 	}
 
 	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
 		if optional {
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-			cfgOptional.NormalizePluginsConfig()
-			return cfgOptional, nil
+			return newOptionalConfig(), nil
 		}
 		return nil, errValidate
 	}
@@ -81,11 +82,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-			cfgOptional.NormalizePluginsConfig()
-			return cfgOptional, nil
+			return newOptionalConfig(), nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	cfg.ImageStorage.ApplyEnvironmentOverrides()
+	if errValidate := cfg.ImageStorage.Validate(); errValidate != nil {
+		return nil, errValidate
 	}
 
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()

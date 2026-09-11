@@ -318,6 +318,19 @@ func TestImagesEditsJSONRejectsUnsupportedModel(t *testing.T) {
 	assertUnsupportedImagesModelResponse(t, resp, "gpt-5.4-mini")
 }
 
+func TestImagesEditsJSONRejectsFileIDReferenceForCodexModel(t *testing.T) {
+	handler := &OpenAIAPIHandler{}
+	body := strings.NewReader(`{"model":"gpt-image-2","prompt":"edit this","images":[{"file_id":"file-abc123"}]}`)
+	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+	}
+	if message := gjson.GetBytes(resp.Body.Bytes(), "error.message").String(); !strings.Contains(message, "file_id image references are not supported") {
+		t.Fatalf("error message = %q, want file_id rejection", message)
+	}
+}
+
 func TestImagesEditsMultipartRejectsUnsupportedModel(t *testing.T) {
 	handler := &OpenAIAPIHandler{}
 	var body bytes.Buffer

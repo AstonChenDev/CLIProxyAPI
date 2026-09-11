@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/imagestorage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -36,7 +37,8 @@ const (
 	codexGPTImage15Model         = "gpt-image-1.5"
 	codexGPTImage25FlareModel    = "gpt-image-2.5-flare"
 	codexGPTImage25SunburstModel = "gpt-image-2.5-sunburst"
-	codexOpenAIImagesMainModel   = "gpt-5.4-mini"
+	codexOpenAIImagesMainModel   = "gpt-5.5"
+	codexOpenAIImagesInstruction = "Use the image_generation tool to create exactly one image for the user request. Return the generated image result."
 )
 
 type codexOpenAIImagePreparedRequest struct {
@@ -91,6 +93,10 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	prepared, errPrepare := codexPrepareOpenAIImageRequest(req, opts)
 	if errPrepare != nil {
 		return resp, errPrepare
+	}
+	prepared.Body, errPrepare = helps.ResolveResponsesInputImages(ctx, e.cfg, auth, prepared.Body)
+	if errPrepare != nil {
+		return resp, statusErr{code: http.StatusBadRequest, msg: errPrepare.Error()}
 	}
 
 	apiKey, baseURL := codexCreds(auth)
@@ -172,6 +178,10 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 			if errOutput != nil {
 				return resp, errOutput
 			}
+			out, errOutput = imagestorage.RewriteOpenAIResponse(ctx, e.cfg, out, prepared.ResponseFormat)
+			if errOutput != nil {
+				return resp, errOutput
+			}
 			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 		}
 	}
@@ -188,6 +198,10 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	prepared, errPrepare := codexPrepareOpenAIImageRequest(req, opts)
 	if errPrepare != nil {
 		return nil, errPrepare
+	}
+	prepared.Body, errPrepare = helps.ResolveResponsesInputImages(ctx, e.cfg, auth, prepared.Body)
+	if errPrepare != nil {
+		return nil, statusErr{code: http.StatusBadRequest, msg: errPrepare.Error()}
 	}
 
 	apiKey, baseURL := codexCreds(auth)
@@ -300,7 +314,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 					return
 				}
 				for _, img := range results {
-					frame := codexBuildImageCompletedFrame(img, usageRaw, prepared.ResponseFormat, prepared.StreamPrefix)
+					frame := codexBuildImageCompletedFrame(ctx, e.cfg, img, usageRaw, prepared.ResponseFormat, prepared.StreamPrefix)
 					if len(frame) > 0 && !sendPayload(frame) {
 						return
 					}
@@ -375,6 +389,10 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
+	data, err = imagestorage.RewriteOpenAIResponse(ctx, e.cfg, data, codexOpenAIImageResponseFormatFromJSON(body))
+	if err != nil {
+		return resp, err
+	}
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
 
@@ -481,6 +499,13 @@ func codexDirectOpenAIImageEndpoint(req cliproxyexecutor.Request, opts cliproxye
 	}
 	path := helps.PayloadRequestPath(opts)
 	if strings.HasSuffix(strings.TrimSpace(path), codexImagesGenerationsPath) {
+		// The Image API generations endpoint creates images from text only. Keep
+		// the public generations route for chatgpt2api compatibility, but route
+		// requests containing reference images through Responses so the images
+		// are delivered to the upstream model as input_image content parts.
+		if json.Valid(req.Payload) && len(codexCollectOpenAIImageReferences(req.Payload)) > 0 {
+			return ""
+		}
 		return codexDirectImagesGenerations
 	}
 	if strings.HasSuffix(strings.TrimSpace(path), codexImagesEditsPath) {
@@ -512,6 +537,7 @@ func codexPrepareDirectOpenAIImagePayload(req cliproxyexecutor.Request, opts cli
 
 func codexPrepareDirectOpenAIImageEditPayload(payload []byte, model string, contentType string, stream bool) ([]byte, string, error) {
 	if json.Valid(payload) {
+		payload = normalizeCodexImageEditJSONPayload(payload)
 		return prepareOpenAICompatImagesPayload(payload, model, contentType, stream)
 	}
 
@@ -524,6 +550,83 @@ func codexPrepareDirectOpenAIImageEditPayload(payload []byte, model string, cont
 		return nil, "", fmt.Errorf("multipart boundary is missing")
 	}
 	return codexRewriteOpenAIImageEditMultipartToJSON(payload, model, boundary, stream)
+}
+
+// normalizeCodexImageEditJSONPayload accepts the same image reference aliases
+// as chatgpt2api while retaining the native images[].image_url shape expected by
+// Codex's direct image edit endpoint. Existing object references (including
+// file_id values used by legacy callers) are preserved unchanged.
+func normalizeCodexImageEditJSONPayload(payload []byte) []byte {
+	if !json.Valid(payload) {
+		return payload
+	}
+	images := make([][]byte, 0)
+	var appendReference func(gjson.Result)
+	appendReference = func(value gjson.Result) {
+		if !value.Exists() {
+			return
+		}
+		if value.IsArray() {
+			for _, item := range value.Array() {
+				appendReference(item)
+			}
+			return
+		}
+		if value.IsObject() {
+			if imageURL := value.Get("image_url"); imageURL.Exists() {
+				if imageURL.IsObject() {
+					if ref := strings.TrimSpace(imageURL.Get("url").String()); ref != "" {
+						item := []byte(`{"image_url":""}`)
+						item, _ = sjson.SetBytes(item, "image_url", ref)
+						images = append(images, item)
+						return
+					}
+				}
+				if ref := strings.TrimSpace(imageURL.String()); ref != "" {
+					item := []byte(`{"image_url":""}`)
+					item, _ = sjson.SetBytes(item, "image_url", ref)
+					images = append(images, item)
+					return
+				}
+			}
+			if value.Get("file_id").Exists() || value.Get("b64_json").Exists() {
+				images = append(images, []byte(value.Raw))
+				return
+			}
+			if value.Get("url").Exists() {
+				item := []byte(`{"image_url":""}`)
+				item, _ = sjson.SetBytes(item, "image_url", value.Get("url").String())
+				images = append(images, item)
+			}
+			return
+		}
+		ref := strings.TrimSpace(value.String())
+		if ref == "" {
+			return
+		}
+		item := []byte(`{"image_url":""}`)
+		item, _ = sjson.SetBytes(item, "image_url", ref)
+		images = append(images, item)
+	}
+
+	if existing := gjson.GetBytes(payload, "images"); existing.IsArray() {
+		for _, item := range existing.Array() {
+			appendReference(item)
+		}
+	} else {
+		appendReference(gjson.GetBytes(payload, "images"))
+		appendReference(gjson.GetBytes(payload, "image"))
+		appendReference(gjson.GetBytes(payload, "image_url"))
+	}
+	if len(images) > 0 {
+		payload, _ = sjson.SetRawBytes(payload, "images", helps.JoinRawJSONArray(images))
+	}
+
+	mask := gjson.GetBytes(payload, "mask")
+	if mask.Exists() && mask.Type == gjson.String && strings.TrimSpace(mask.String()) != "" {
+		payload, _ = sjson.SetBytes(payload, "mask.image_url", strings.TrimSpace(mask.String()))
+	}
+	return payload
 }
 
 func codexRewriteOpenAIImageEditMultipartToJSON(payload []byte, model string, boundary string, stream bool) ([]byte, string, error) {
@@ -544,9 +647,29 @@ func codexRewriteOpenAIImageEditMultipartToJSON(payload []byte, model string, bo
 		out, _ = sjson.SetBytes(out, "stream", true)
 	}
 
+	formImageRefs := make([]string, 0)
+	formImageRawRefs := make([]string, 0)
 	for key, values := range form.Value {
 		key = strings.TrimSpace(key)
 		if key == "" || key == "model" || key == "stream" {
+			continue
+		}
+		if codexIsImageReferenceField(key) {
+			for _, value := range values {
+				if key == "images" && !strings.HasPrefix(strings.TrimSpace(value), "[") && !strings.HasPrefix(strings.TrimSpace(value), "{") {
+					if strings.TrimSpace(value) != "" {
+						formImageRawRefs = append(formImageRawRefs, strings.TrimSpace(value))
+					}
+					continue
+				}
+				formImageRefs = append(formImageRefs, codexExpandImageReferenceValue(value)...)
+			}
+			continue
+		}
+		if key == "mask" || key == "mask[]" {
+			if len(values) > 0 && strings.TrimSpace(values[0]) != "" {
+				out, _ = sjson.SetBytes(out, "mask.image_url", strings.TrimSpace(values[0]))
+			}
 			continue
 		}
 		out = codexSetOpenAIImageEditFormValues(out, key, values)
@@ -563,9 +686,18 @@ func codexRewriteOpenAIImageEditMultipartToJSON(payload []byte, model string, bo
 	imageFiles := codexMultipartImageFiles(form)
 	if existingImages := gjson.GetBytes(out, "images"); !existingImages.Exists() || existingImages.IsArray() {
 		existingItems := existingImages.Array()
-		imageItems := make([][]byte, 0, len(existingItems)+len(imageFiles))
+		imageItems := make([][]byte, 0, len(existingItems)+len(imageFiles)+len(formImageRefs)+len(formImageRawRefs))
 		for _, image := range existingItems {
 			imageItems = append(imageItems, []byte(image.Raw))
+		}
+		for _, ref := range formImageRawRefs {
+			item, _ := json.Marshal(ref)
+			imageItems = append(imageItems, item)
+		}
+		for _, ref := range formImageRefs {
+			item := []byte(`{"image_url":""}`)
+			item, _ = sjson.SetBytes(item, "image_url", ref)
+			imageItems = append(imageItems, item)
 		}
 		for _, fileHeader := range imageFiles {
 			dataURL, errData := codexMultipartFileToDataURL(fileHeader)
@@ -576,10 +708,13 @@ func codexRewriteOpenAIImageEditMultipartToJSON(payload []byte, model string, bo
 			item, _ = sjson.SetBytes(item, "image_url", dataURL)
 			imageItems = append(imageItems, item)
 		}
-		if len(imageFiles) > 0 {
+		if len(imageFiles) > 0 || len(formImageRefs) > 0 || len(formImageRawRefs) > 0 {
 			out, _ = sjson.SetRawBytes(out, "images", helps.JoinRawJSONArray(imageItems))
 		}
 	} else {
+		for _, ref := range formImageRefs {
+			out, _ = sjson.SetBytes(out, "images.-1.image_url", ref)
+		}
 		for _, fileHeader := range imageFiles {
 			dataURL, errData := codexMultipartFileToDataURL(fileHeader)
 			if errData != nil {
@@ -590,6 +725,52 @@ func codexRewriteOpenAIImageEditMultipartToJSON(payload []byte, model string, bo
 	}
 
 	return out, "application/json", nil
+}
+
+func codexIsImageReferenceField(key string) bool {
+	switch strings.TrimSpace(key) {
+	case "image", "image[]", "images", "images[]", "image_url", "image_url[]":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexExpandImageReferenceValue(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if strings.HasPrefix(value, "[") && json.Valid([]byte(value)) {
+		var values []string
+		if json.Unmarshal([]byte(value), &values) == nil {
+			return values
+		}
+		var objects []map[string]any
+		if json.Unmarshal([]byte(value), &objects) == nil {
+			refs := make([]string, 0, len(objects))
+			for _, item := range objects {
+				if ref, ok := item["image_url"].(string); ok && strings.TrimSpace(ref) != "" {
+					refs = append(refs, strings.TrimSpace(ref))
+				} else if ref, ok := item["url"].(string); ok && strings.TrimSpace(ref) != "" {
+					refs = append(refs, strings.TrimSpace(ref))
+				}
+			}
+			return refs
+		}
+	}
+	if strings.HasPrefix(value, "{") && json.Valid([]byte(value)) {
+		var object map[string]any
+		if json.Unmarshal([]byte(value), &object) == nil {
+			if ref, ok := object["image_url"].(string); ok && strings.TrimSpace(ref) != "" {
+				return []string{strings.TrimSpace(ref)}
+			}
+			if ref, ok := object["url"].(string); ok && strings.TrimSpace(ref) != "" {
+				return []string{strings.TrimSpace(ref)}
+			}
+		}
+	}
+	return []string{value}
 }
 
 func codexSetOpenAIImageEditFormValues(out []byte, key string, values []string) []byte {
@@ -704,7 +885,7 @@ func recordCodexOpenAIImageRequest(ctx context.Context, cfg *config.Config, prov
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   headers,
-		Body:      body,
+		Body:      helps.RedactResponsesInputImages(body),
 		Provider:  provider,
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -735,8 +916,13 @@ func codexPrepareOpenAIImageGenerationJSON(rawJSON []byte, routeModel string) (c
 		return codexOpenAIImagePreparedRequest{}, fmt.Errorf("invalid OpenAI image generation request JSON")
 	}
 	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
-	tool := codexBuildOpenAIImageTool(rawJSON, routeModel, "generate", []string{"size", "quality", "background", "output_format", "moderation"}, []string{"output_compression", "partial_images"})
-	body := codexBuildImagesResponsesRequest(prompt, nil, tool)
+	images := codexCollectOpenAIImageReferences(rawJSON)
+	action := "generate"
+	if len(images) > 0 {
+		action = "edit"
+	}
+	tool := codexBuildOpenAIImageTool(rawJSON, routeModel, action, []string{"size", "quality", "background", "output_format", "moderation"}, []string{"output_compression", "partial_images"})
+	body := codexBuildImagesResponsesRequest(prompt, images, tool)
 	return codexOpenAIImagePreparedRequest{
 		Body:           body,
 		ResponseFormat: codexOpenAIImageResponseFormatFromJSON(rawJSON),
@@ -744,22 +930,65 @@ func codexPrepareOpenAIImageGenerationJSON(rawJSON []byte, routeModel string) (c
 	}, nil
 }
 
+func codexCollectOpenAIImageReferences(rawJSON []byte) []string {
+	refs := make([]string, 0, 4)
+	var appendValue func(gjson.Result)
+	appendValue = func(value gjson.Result) {
+		if !value.Exists() {
+			return
+		}
+		if value.IsArray() {
+			for _, item := range value.Array() {
+				appendValue(item)
+			}
+			return
+		}
+		if value.IsObject() {
+			if imageURL := strings.TrimSpace(value.Get("image_url.url").String()); imageURL != "" {
+				refs = append(refs, imageURL)
+				return
+			}
+			if imageURL := strings.TrimSpace(value.Get("image_url").String()); imageURL != "" {
+				refs = append(refs, imageURL)
+				return
+			}
+			if imageURL := strings.TrimSpace(value.Get("url").String()); imageURL != "" {
+				refs = append(refs, imageURL)
+				return
+			}
+			if encoded := strings.TrimSpace(value.Get("b64_json").String()); encoded != "" {
+				refs = append(refs, encoded)
+			}
+			return
+		}
+		if ref := strings.TrimSpace(value.String()); ref != "" {
+			refs = append(refs, ref)
+		}
+	}
+	for _, key := range []string{"image", "images", "image_url"} {
+		appendValue(gjson.GetBytes(rawJSON, key))
+	}
+	if len(refs) > 4 {
+		return refs[:4]
+	}
+	return refs
+}
+
 func codexPrepareOpenAIImageEditJSON(rawJSON []byte, routeModel string) (codexOpenAIImagePreparedRequest, error) {
 	if !json.Valid(rawJSON) {
 		return codexOpenAIImagePreparedRequest{}, fmt.Errorf("invalid OpenAI image edit request JSON")
 	}
 	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
-	images := make([]string, 0)
-	if imagesResult := gjson.GetBytes(rawJSON, "images"); imagesResult.IsArray() {
-		for _, img := range imagesResult.Array() {
-			url := strings.TrimSpace(img.Get("image_url").String())
-			if url != "" {
-				images = append(images, url)
-			}
-		}
-	}
+	images := codexCollectOpenAIImageReferences(rawJSON)
 	tool := codexBuildOpenAIImageTool(rawJSON, routeModel, "edit", []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"}, []string{"output_compression", "partial_images"})
-	if mask := strings.TrimSpace(gjson.GetBytes(rawJSON, "mask.image_url").String()); mask != "" {
+	mask := strings.TrimSpace(gjson.GetBytes(rawJSON, "mask.image_url").String())
+	if mask == "" {
+		mask = strings.TrimSpace(gjson.GetBytes(rawJSON, "mask.url").String())
+	}
+	if mask == "" {
+		mask = strings.TrimSpace(gjson.GetBytes(rawJSON, "mask").String())
+	}
+	if mask != "" {
 		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", mask)
 	}
 	body := codexBuildImagesResponsesRequest(prompt, images, tool)
@@ -807,13 +1036,16 @@ func codexPrepareOpenAIImageEditMultipart(rawBody []byte, routeModel string, con
 		}
 	}
 
-	images := make([]string, 0)
+	images := codexMultipartImageReferenceValues(form)
 	for _, fh := range codexMultipartImageFiles(form) {
 		dataURL, errData := codexMultipartFileToDataURL(fh)
 		if errData != nil {
 			return codexOpenAIImagePreparedRequest{}, errData
 		}
 		images = append(images, dataURL)
+	}
+	if mask := codexMultipartMaskReferenceValue(form); mask != "" {
+		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", mask)
 	}
 	if maskFiles := form.File["mask"]; len(maskFiles) > 0 && maskFiles[0] != nil {
 		dataURL, errData := codexMultipartFileToDataURL(maskFiles[0])
@@ -843,10 +1075,10 @@ func codexOpenAIImageResponseFormatFromJSON(rawJSON []byte) string {
 }
 
 func codexNormalizeImageResponseFormat(responseFormat string) string {
-	if strings.EqualFold(strings.TrimSpace(responseFormat), "url") {
-		return "url"
+	if strings.EqualFold(strings.TrimSpace(responseFormat), "b64_json") || strings.TrimSpace(responseFormat) == "" {
+		return "b64_json"
 	}
-	return "b64_json"
+	return "url"
 }
 
 func codexOpenAIImageToolModel(requestModel string, routeModel string) string {
@@ -880,6 +1112,7 @@ func codexBuildOpenAIImageTool(rawJSON []byte, routeModel string, action string,
 func codexBuildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
 	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"},"tools":[]}`)
 	req, _ = sjson.SetBytes(req, "model", codexOpenAIImagesMainModel)
+	req, _ = sjson.SetBytes(req, "instructions", codexOpenAIImagesInstruction)
 	if len(toolJSON) > 0 && json.Valid(toolJSON) {
 		req, _ = sjson.SetRawBytes(req, "tools", helps.JoinRawJSONArray([][]byte{toolJSON}))
 	}
@@ -924,10 +1157,39 @@ func codexMultipartImageFiles(form *multipart.Form) []*multipart.FileHeader {
 	if form == nil {
 		return nil
 	}
-	if files := form.File["image[]"]; len(files) > 0 {
-		return files
+	files := make([]*multipart.FileHeader, 0)
+	for _, key := range []string{"image", "image[]", "images", "images[]", "image_url", "image_url[]"} {
+		files = append(files, form.File[key]...)
 	}
-	return form.File["image"]
+	return files
+}
+
+func codexMultipartImageReferenceValues(form *multipart.Form) []string {
+	if form == nil {
+		return nil
+	}
+	refs := make([]string, 0)
+	for _, key := range []string{"image", "image[]", "images", "images[]", "image_url", "image_url[]"} {
+		for _, value := range form.Value[key] {
+			refs = append(refs, codexExpandImageReferenceValue(value)...)
+		}
+	}
+	return refs
+}
+
+func codexMultipartMaskReferenceValue(form *multipart.Form) string {
+	if form == nil {
+		return ""
+	}
+	for _, key := range []string{"mask", "mask[]"} {
+		for _, value := range form.Value[key] {
+			refs := codexExpandImageReferenceValue(value)
+			if len(refs) > 0 && strings.TrimSpace(refs[0]) != "" {
+				return strings.TrimSpace(refs[0])
+			}
+		}
+	}
+	return ""
 }
 
 func codexMultipartFileToDataURL(fileHeader *multipart.FileHeader) (string, error) {
@@ -1085,17 +1347,26 @@ func codexBuildImagePartialFrame(payload []byte, responseFormat string, streamPr
 	return codexBuildSSEFrame(eventName, data)
 }
 
-func codexBuildImageCompletedFrame(img codexImageCallResult, usageRaw []byte, responseFormat string, streamPrefix string) []byte {
+func codexBuildImageCompletedFrame(ctx context.Context, cfg *config.Config, img codexImageCallResult, usageRaw []byte, responseFormat string, streamPrefix string) []byte {
 	eventName := strings.TrimSpace(streamPrefix) + ".completed"
 	data := []byte(`{"type":""}`)
 	data, _ = sjson.SetBytes(data, "type", eventName)
 	if len(usageRaw) > 0 && json.Valid(usageRaw) {
 		data, _ = sjson.SetRawBytes(data, "usage", usageRaw)
 	}
+	storedURL := "data:" + codexMimeTypeFromOutputFormat(img.OutputFormat) + ";base64," + img.Result
+	if cfg != nil && cfg.ImageStorage.Enabled {
+		if url, errStore := imagestorage.StoreBase64(ctx, cfg, img.Result, img.OutputFormat); errStore == nil {
+			storedURL = url
+		} else {
+			log.WithError(errStore).Warn("image storage failed; returning inline image URL")
+		}
+	}
 	if codexNormalizeImageResponseFormat(responseFormat) == "url" {
-		data, _ = sjson.SetBytes(data, "url", "data:"+codexMimeTypeFromOutputFormat(img.OutputFormat)+";base64,"+img.Result)
+		data, _ = sjson.SetBytes(data, "url", storedURL)
 	} else {
 		data, _ = sjson.SetBytes(data, "b64_json", img.Result)
+		data, _ = sjson.SetBytes(data, "url", storedURL)
 	}
 	return codexBuildSSEFrame(eventName, data)
 }

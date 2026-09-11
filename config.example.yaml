@@ -194,6 +194,24 @@ claude-code:
 # - "passthrough": never inject or strip image_generation on non-images endpoints (forward the client payload unchanged); behaves like "chat" on /v1/images/* endpoints.
 disable-image-generation: false
 
+# Persist generated image results using the same storage contract as chatgpt2api.
+# Credentials should be supplied with environment variables rather than written here.
+# CHATGPT2API_* names are accepted for drop-in production compatibility; CLIPROXY_* aliases
+# are also accepted for isolated deployments.
+# image-storage:
+#   enabled: true
+#   mode: cos                 # chatgpt2api-compatible values; COS enables remote persistence here
+#   cos-region: ""
+#   cos-bucket: ""
+#   cos-path-prefix: "generated/"
+#   public-base-url: ""      # optional CDN/public URL prefix
+# Environment variables:
+#   CHATGPT2API_IMAGE_STORAGE_ENABLED
+#   CHATGPT2API_IMAGE_STORAGE_MODE
+#   CHATGPT2API_COS_SECRET_ID / CHATGPT2API_COS_SECRET_KEY
+#   CHATGPT2API_COS_REGION / CHATGPT2API_COS_BUCKET
+#   CHATGPT2API_COS_PATH_PREFIX / CHATGPT2API_IMAGE_PUBLIC_BASE_URL
+
 # Base model used by the legacy hosted image_generation tool path when a Codex image request is not proxied directly through the Image API.
 # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
 # gpt-image-2-base-model: "gpt-5.4-mini"

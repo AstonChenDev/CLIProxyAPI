@@ -9,6 +9,11 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ImageStorage configures persistence of generated image results. Secrets should
+	// normally be supplied through the CHATGPT2API_* environment variables so they
+	// are not written to the YAML configuration file.
+	ImageStorage ImageStorageConfig `yaml:"image-storage" json:"image-storage"`
+
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
 	// Supported values:

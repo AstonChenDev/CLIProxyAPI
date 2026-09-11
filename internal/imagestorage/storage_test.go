@@ -65,6 +65,29 @@ func TestRewriteOpenAIResponseURLFormatOmitsBase64(t *testing.T) {
 	}
 }
 
+func TestRewriteOpenAIResponseStoresInlineURLResult(t *testing.T) {
+	cfg := &config.Config{SDKConfig: config.SDKConfig{ImageStorage: config.ImageStorageConfig{
+		Enabled: true,
+		Mode:    "local",
+	}}}
+	encoded := base64.StdEncoding.EncodeToString([]byte("image-bytes"))
+	payload := []byte(`{"created":1,"output_format":"png","data":[{"url":"data:image/webp;base64,` + encoded + `"}]}`)
+
+	out, errRewrite := RewriteOpenAIResponse(context.Background(), cfg, payload, "url")
+	if errRewrite != nil {
+		t.Fatalf("RewriteOpenAIResponse() error = %v", errRewrite)
+	}
+	var root struct {
+		Data []map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatalf("decode rewritten response: %v", err)
+	}
+	if got := root.Data[0]["url"]; !strings.HasPrefix(got, "data:image/webp;base64,") {
+		t.Fatalf("url = %q, want stored WebP URL", got)
+	}
+}
+
 func TestRewriteOpenAIResponseDisabledLeavesPayloadUntouched(t *testing.T) {
 	cfg := &config.Config{}
 	payload := []byte(`{"created":1,"data":[{"b64_json":"AA=="}]}`)

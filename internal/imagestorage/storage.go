@@ -95,6 +95,15 @@ func RewriteOpenAIResponse(ctx context.Context, cfg *config.Config, payload []by
 			_ = json.Unmarshal(raw, &encoded)
 		}
 		if strings.TrimSpace(encoded) == "" {
+			var imageURL string
+			if raw, exists := item["url"]; exists {
+				_ = json.Unmarshal(raw, &imageURL)
+			}
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(imageURL)), "data:image/") {
+				encoded = imageURL
+			}
+		}
+		if strings.TrimSpace(encoded) == "" {
 			continue
 		}
 		data, errDecode := decodeBase64(encoded)
@@ -102,10 +111,18 @@ func RewriteOpenAIResponse(ctx context.Context, cfg *config.Config, payload []by
 			return nil, errDecode
 		}
 		contentType := mimeType("")
+		if raw, exists := root["output_format"]; exists {
+			var outputFormat string
+			_ = json.Unmarshal(raw, &outputFormat)
+			contentType = mimeType(outputFormat)
+		}
 		if raw, exists := item["output_format"]; exists {
 			var outputFormat string
 			_ = json.Unmarshal(raw, &outputFormat)
 			contentType = mimeType(outputFormat)
+		}
+		if dataURLType := imageDataURLMIMEType(encoded); dataURLType != "" {
+			contentType = dataURLType
 		}
 		storedURL, errStore := StoreBytes(ctx, cfg, data, contentType)
 		if errStore != nil {
@@ -124,6 +141,19 @@ func RewriteOpenAIResponse(ctx context.Context, cfg *config.Config, payload []by
 	}
 	root["data"], _ = json.Marshal(items)
 	return json.Marshal(root)
+}
+
+func imageDataURLMIMEType(value string) string {
+	header, _, ok := strings.Cut(strings.TrimSpace(value), ",")
+	if !ok {
+		return ""
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(header, ";", 2)[0]))
+	mediaType = strings.TrimPrefix(mediaType, "data:")
+	if !strings.HasPrefix(mediaType, "image/") {
+		return ""
+	}
+	return mediaType
 }
 
 // StoreBytes uploads image data to Tencent COS when configured. If storage is

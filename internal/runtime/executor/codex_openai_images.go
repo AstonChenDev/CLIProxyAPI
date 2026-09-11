@@ -95,7 +95,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	if errPrepare != nil {
 		return resp, errPrepare
 	}
-	prepared.Body, errPrepare = helps.ResolveResponsesInputImages(ctx, e.cfg, auth, prepared.Body)
+	prepared.Body, errPrepare = helps.ResolveResponsesInputImages(ctx, e.cfg, prepared.Body)
 	if errPrepare != nil {
 		return resp, statusErr{code: http.StatusBadRequest, msg: errPrepare.Error()}
 	}
@@ -200,7 +200,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
-	prepared.Body, errPrepare = helps.ResolveResponsesInputImages(ctx, e.cfg, auth, prepared.Body)
+	prepared.Body, errPrepare = helps.ResolveResponsesInputImages(ctx, e.cfg, prepared.Body)
 	if errPrepare != nil {
 		return nil, statusErr{code: http.StatusBadRequest, msg: errPrepare.Error()}
 	}

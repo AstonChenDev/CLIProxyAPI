@@ -18,7 +18,7 @@ func TestResolveResponsesInputImagesConvertsRemoteImageToDataURL(t *testing.T) {
 	defer server.Close()
 
 	payload := []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"keep me"},{"type":"input_image","image_url":"` + server.URL + `/reference.png"}]}]}`)
-	out, errResolve := ResolveResponsesInputImages(context.Background(), nil, nil, payload)
+	out, errResolve := ResolveResponsesInputImages(context.Background(), nil, payload)
 	if errResolve != nil {
 		t.Fatalf("ResolveResponsesInputImages() error = %v", errResolve)
 	}
@@ -38,14 +38,14 @@ func TestResolveResponsesInputImagesRejectsNonImageResponse(t *testing.T) {
 	defer server.Close()
 
 	payload := []byte(`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"` + server.URL + `/reference.txt"}]}]}`)
-	if _, errResolve := ResolveResponsesInputImages(context.Background(), nil, nil, payload); errResolve == nil || !strings.Contains(errResolve.Error(), "does not contain an image") {
+	if _, errResolve := ResolveResponsesInputImages(context.Background(), nil, payload); errResolve == nil || !strings.Contains(errResolve.Error(), "does not contain an image") {
 		t.Fatalf("ResolveResponsesInputImages() error = %v, want non-image rejection", errResolve)
 	}
 }
 
 func TestResolveResponsesInputImagesAcceptsChatGPT2APIBase64(t *testing.T) {
 	payload := []byte(`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"iVBORw0KGgo="}]}]}`)
-	out, errResolve := ResolveResponsesInputImages(context.Background(), nil, nil, payload)
+	out, errResolve := ResolveResponsesInputImages(context.Background(), nil, payload)
 	if errResolve != nil {
 		t.Fatalf("ResolveResponsesInputImages() error = %v", errResolve)
 	}

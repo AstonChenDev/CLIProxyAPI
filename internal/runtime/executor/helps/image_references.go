@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -26,7 +25,7 @@ const (
 // Responses request into validated data URLs. The Codex Responses backend only
 // accepts inline image data for image editing, even though the public compatible
 // endpoint also accepts remote image URLs.
-func ResolveResponsesInputImages(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte) ([]byte, error) {
+func ResolveResponsesInputImages(ctx context.Context, cfg *config.Config, payload []byte) ([]byte, error) {
 	if !json.Valid(payload) {
 		return nil, fmt.Errorf("invalid Responses request JSON")
 	}
@@ -43,7 +42,7 @@ func ResolveResponsesInputImages(ctx context.Context, cfg *config.Config, auth *
 				continue
 			}
 
-			dataURL, imageBytes, errResolve := resolveInputImageReference(ctx, cfg, auth, reference)
+			dataURL, imageBytes, errResolve := resolveInputImageReference(ctx, cfg, reference)
 			if errResolve != nil {
 				return nil, errResolve
 			}
@@ -79,7 +78,7 @@ func RedactResponsesInputImages(payload []byte) []byte {
 	return out
 }
 
-func resolveInputImageReference(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, reference string) (string, int, error) {
+func resolveInputImageReference(ctx context.Context, cfg *config.Config, reference string) (string, int, error) {
 	reference = strings.TrimSpace(reference)
 	switch {
 	case strings.HasPrefix(strings.ToLower(reference), "data:"):
@@ -89,7 +88,7 @@ func resolveInputImageReference(ctx context.Context, cfg *config.Config, auth *c
 		}
 		return inputImageDataURL(data)
 	case strings.HasPrefix(strings.ToLower(reference), "http://"), strings.HasPrefix(strings.ToLower(reference), "https://"):
-		data, errDownload := downloadInputImageReference(ctx, cfg, auth, reference)
+		data, errDownload := downloadInputImageReference(ctx, cfg, reference)
 		if errDownload != nil {
 			return "", 0, errDownload
 		}
@@ -118,7 +117,7 @@ func decodeInputImageDataURL(reference string) ([]byte, error) {
 	return data, nil
 }
 
-func downloadInputImageReference(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, reference string) ([]byte, error) {
+func downloadInputImageReference(ctx context.Context, cfg *config.Config, reference string) ([]byte, error) {
 	parsed, errParse := url.Parse(reference)
 	if errParse != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, fmt.Errorf("input image URL must use http or https")
@@ -131,7 +130,10 @@ func downloadInputImageReference(ctx context.Context, cfg *config.Config, auth *
 	req.Header.Set("Accept", "image/*,*/*;q=0.8")
 	req.Header.Set("User-Agent", "CLIProxyAPI image fetcher")
 
-	resp, errDo := NewProxyAwareHTTPClient(ctx, cfg, auth, 0).Do(req)
+	// Reference images are client inputs, not provider traffic. Do not inherit
+	// an account-specific upstream proxy, which may only permit OpenAI hosts and
+	// would make image downloads fail depending on the selected account.
+	resp, errDo := NewProxyAwareHTTPClient(ctx, cfg, nil, 0).Do(req)
 	if errDo != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

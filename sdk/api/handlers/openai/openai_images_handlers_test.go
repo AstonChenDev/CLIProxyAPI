@@ -46,7 +46,7 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 	}
 
 	message := gjson.GetBytes(resp.Body.Bytes(), "error.message").String()
-	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + gptImage25FlareModel + ", " + gptImage25SunburstModel + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
+	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + gptImage25FlareModel + ", " + gptImage25SunburstModel + ", " + gptImage25Model + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
 	if message != expectedMessage {
 		t.Fatalf("error message = %q, want %q", message, expectedMessage)
 	}
@@ -56,7 +56,24 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 }
 
 func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
-	for _, model := range []string{"gpt-image-1.5", "codex/gpt-image-1.5", "gpt-image-2", "codex/gpt-image-2", "gpt-image-2.5-flare", "codex/gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "codex/gpt-image-2.5-sunburst", "grok-imagine-image", "xai/grok-imagine-image", "grok-imagine-image-quality", "xai/grok-imagine-image-quality", "grok-imagine-image-2.0", "xai/grok-imagine-image-2.0"} {
+	for _, model := range []string{
+		"gpt-image-1.5",
+		"codex/gpt-image-1.5",
+		"gpt-image-2",
+		"codex/gpt-image-2",
+		"gpt-image-2.5-flare",
+		"codex/gpt-image-2.5-flare",
+		"gpt-image-2.5-sunburst",
+		"codex/gpt-image-2.5-sunburst",
+		"gpt-image-2.5",
+		"codex/gpt-image-2.5",
+		"grok-imagine-image",
+		"xai/grok-imagine-image",
+		"grok-imagine-image-quality",
+		"xai/grok-imagine-image-quality",
+		"grok-imagine-image-2.0",
+		"xai/grok-imagine-image-2.0",
+	} {
 		if !isSupportedImagesModel(model) {
 			t.Fatalf("expected %s to be supported", model)
 		}
@@ -66,35 +83,6 @@ func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
 	}
 	if isSupportedImagesModel("codex/grok-imagine-image") {
 		t.Fatal("expected codex/grok-imagine-image to be rejected")
-	}
-}
-
-func TestImagesGenerationsRejectsGPTImage25Streaming(t *testing.T) {
-	handler := &OpenAIAPIHandler{}
-	for _, model := range []string{gptImage25FlareModel, gptImage25SunburstModel, "codex/" + gptImage25FlareModel} {
-		t.Run(model, func(t *testing.T) {
-			body := strings.NewReader(`{"model":"` + model + `","prompt":"draw a square","stream":true}`)
-			resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
-			if resp.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
-			}
-			if message := gjson.GetBytes(resp.Body.Bytes(), "error.message").String(); !strings.Contains(message, "does not support streaming") {
-				t.Fatalf("error message = %q, want streaming rejection", message)
-			}
-		})
-	}
-}
-
-func TestImagesEditsRejectsGPTImage25Flare(t *testing.T) {
-	handler := &OpenAIAPIHandler{}
-	body := strings.NewReader(`{"model":"gpt-image-2.5-flare","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}]}`)
-	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
-
-	if resp.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
-	}
-	if message := gjson.GetBytes(resp.Body.Bytes(), "error.message").String(); !strings.Contains(message, gptImage25SunburstModel) {
-		t.Fatalf("error message = %q, want %s recommendation", message, gptImage25SunburstModel)
 	}
 }
 

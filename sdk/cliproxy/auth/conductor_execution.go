@@ -473,7 +473,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	var localLease *localConcurrencyLease
+	defer func() { localLease.releaseOwner() }()
 	for {
+		localLease.releaseOwner()
+		localLease = nil
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
@@ -494,12 +498,20 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return cliproxyexecutor.Response{}, errPick
 		}
 
+		var errAdmission error
+		localLease, errAdmission = m.acquireLocalConcurrency(auth)
+		if errAdmission != nil {
+			tried[auth.ID] = struct{}{}
+			lastErr = errAdmission
+			continue
+		}
+
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth)
 
 		tried[auth.ID] = struct{}{}
-		execCtx := ctx
+		execCtx := withLocalConcurrency(ctx, localLease)
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
@@ -686,7 +698,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	var localLease *localConcurrencyLease
+	defer func() { localLease.releaseOwner() }()
 	for {
+		localLease.releaseOwner()
+		localLease = nil
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
@@ -707,12 +723,20 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return cliproxyexecutor.Response{}, errPick
 		}
 
+		var errAdmission error
+		localLease, errAdmission = m.acquireLocalConcurrency(auth)
+		if errAdmission != nil {
+			tried[auth.ID] = struct{}{}
+			lastErr = errAdmission
+			continue
+		}
+
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
 		publishSelectedAuthMetadata(opts.Metadata, auth)
 
 		tried[auth.ID] = struct{}{}
-		execCtx := ctx
+		execCtx := withLocalConcurrency(ctx, localLease)
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
@@ -909,7 +933,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
+	var localLease *localConcurrencyLease
+	defer func() { localLease.releaseOwner() }()
 	for {
+		localLease.releaseOwner()
+		localLease = nil
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
 			if lastErr != nil {
@@ -1009,6 +1037,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 		}
 
+		var errAdmission error
+		localLease, errAdmission = m.acquireLocalConcurrency(auth)
+		if errAdmission != nil {
+			tried[auth.ID] = struct{}{}
+			lastErr = errAdmission
+			continue
+		}
+
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
 		if selection != nil {
@@ -1020,7 +1056,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		publishSelectedAuthMetadata(opts.Metadata, auth)
 
 		tried[auth.ID] = struct{}{}
-		execCtx := ctx
+		execCtx := withLocalConcurrency(ctx, localLease)
 		releaseAttempt := func() {}
 		if selection != nil {
 			var errBind error
@@ -1205,6 +1241,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return wrapHomeStream(ctx, streamResult, selection, releaseAttempt), nil
 		}
+		streamResult = finishLocalConcurrencyStream(execCtx, streamResult, localLease)
+		localLease = nil // The stream now owns the admission.
 		return streamResult, nil
 	}
 }

@@ -341,6 +341,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 		"source":         "memory",
 		"size":           int64(0),
 	}
+	if h.authManager != nil {
+		state := h.authManager.LocalConcurrency(auth.ID)
+		entry["max_in_flight"] = state.MaxInFlight
+		entry["admitted_in_flight"] = state.AdmittedInFlight
+	}
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())

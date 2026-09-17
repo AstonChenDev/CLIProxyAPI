@@ -1330,6 +1330,9 @@ func hasAntigravityProvider(providers []string) bool {
 }
 
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
+	if isLocalConcurrencyBusy(lastErr) {
+		return false
+	}
 	if isRequestTerminatedError(lastErr) {
 		return false
 	}
@@ -1376,11 +1379,20 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 	if errCandidates != nil {
 		return cliproxyexecutor.Response{}, false, errCandidates
 	}
+	var localLease *localConcurrencyLease
+	defer func() { localLease.releaseOwner() }()
 	for _, c := range candidates {
+		localLease.releaseOwner()
+		localLease = nil
+		var errAdmission error
+		localLease, errAdmission = m.acquireLocalConcurrency(c.auth)
+		if errAdmission != nil {
+			continue
+		}
 		if ctx.Err() != nil {
 			return cliproxyexecutor.Response{}, false, nil
 		}
-		creditsCtx := WithAntigravityCredits(ctx)
+		creditsCtx := withLocalConcurrency(WithAntigravityCredits(ctx), localLease)
 		if rt := m.roundTripperFor(c.auth); rt != nil {
 			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
 			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
@@ -1439,11 +1451,20 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 	if errCandidates != nil {
 		return nil, false, errCandidates
 	}
+	var localLease *localConcurrencyLease
+	defer func() { localLease.releaseOwner() }()
 	for _, c := range candidates {
+		localLease.releaseOwner()
+		localLease = nil
+		var errAdmission error
+		localLease, errAdmission = m.acquireLocalConcurrency(c.auth)
+		if errAdmission != nil {
+			continue
+		}
 		if ctx.Err() != nil {
 			return nil, false, nil
 		}
-		creditsCtx := WithAntigravityCredits(ctx)
+		creditsCtx := withLocalConcurrency(WithAntigravityCredits(ctx), localLease)
 		if rt := m.roundTripperFor(c.auth); rt != nil {
 			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
 			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
@@ -1464,6 +1485,8 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		if errStream != nil {
 			continue
 		}
+		result = finishLocalConcurrencyStream(creditsCtx, result, localLease)
+		localLease = nil
 		return result, true, nil
 	}
 	return nil, false, nil

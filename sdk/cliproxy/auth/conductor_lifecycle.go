@@ -84,6 +84,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("register auth: %w", errWeight)
 	}
+	if errLimit := ValidateAuthConcurrency(auth); errLimit != nil {
+		return nil, fmt.Errorf("register auth: %w", errLimit)
+	}
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
@@ -163,6 +166,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	NormalizeCredentialMetadata(auth.Metadata)
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("update auth: %w", errWeight)
+	}
+	if errLimit := ValidateAuthConcurrency(auth); errLimit != nil {
+		return nil, fmt.Errorf("update auth: %w", errLimit)
 	}
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
@@ -244,12 +250,12 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		m.scheduler.upsertAuth(authClone.Clone())
 	}
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
+	errPersist := m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
 	}
-	return auth.Clone(), nil
+	return auth.Clone(), errPersist
 }
 
 // Remove deletes an auth from runtime state without persisting.
@@ -348,6 +354,9 @@ func (m *Manager) Load(ctx context.Context) error {
 		if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 			continue
 		}
+		if errLimit := ValidateAuthConcurrency(auth); errLimit != nil {
+			continue
+		}
 		auth.EnsureIndex()
 		m.authEpochs[auth.ID] = max(m.authEpochs[auth.ID], auth.RegistrationEpoch) + 1
 		auth.RegistrationEpoch = m.authEpochs[auth.ID]
@@ -398,6 +407,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return fmt.Errorf("persist auth: %w", errWeight)
+	}
+	if errLimit := ValidateAuthConcurrency(auth); errLimit != nil {
+		return fmt.Errorf("persist auth: %w", errLimit)
 	}
 	if IsConfigAPIKeyAuth(auth) {
 		return nil

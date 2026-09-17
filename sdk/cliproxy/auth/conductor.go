@@ -122,8 +122,10 @@ type Manager struct {
 	selectorMu                sync.Mutex
 	configCooldownMu          sync.Mutex
 	auths                     map[string]*Auth
-	authEpochs                map[string]uint64
-	scheduler                 *authScheduler
+	// localInFlight is guarded by mu and survives credential reloads while calls drain.
+	localInFlight map[string]int64
+	authEpochs    map[string]uint64
+	scheduler     *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.

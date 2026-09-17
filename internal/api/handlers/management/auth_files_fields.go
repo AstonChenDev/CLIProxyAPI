@@ -292,7 +292,25 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			targetAuth.Metadata = make(map[string]any)
 		}
 
-		if fieldPath == coreauth.AttributeWeight {
+		if fieldPath == coreauth.MaxInFlightMetadataKey {
+			if coreauth.IsConfigAPIKeyAuth(targetAuth) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "max_in_flight is currently supported for persisted auth files only"})
+				return
+			}
+			limit, errLimit := coreauth.ParseMaxInFlight(value)
+			if errLimit != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errLimit.Error()})
+				return
+			}
+			if limit == 0 {
+				delete(targetAuth.Metadata, coreauth.MaxInFlightMetadataKey)
+			} else {
+				targetAuth.Metadata[coreauth.MaxInFlightMetadataKey] = limit
+			}
+		} else if rootAuthFileField(fieldPath) == coreauth.MaxInFlightMetadataKey {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "max_in_flight does not support nested fields"})
+			return
+		} else if fieldPath == coreauth.AttributeWeight {
 			if value == nil {
 				delete(targetAuth.Metadata, coreauth.AttributeWeight)
 			} else {

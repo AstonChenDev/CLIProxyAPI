@@ -30,6 +30,7 @@ auths/*
 
 # Documentation
 docs/*
+!docs/credential-concurrency.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

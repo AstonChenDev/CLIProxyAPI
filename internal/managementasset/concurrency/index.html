@@ -16,7 +16,7 @@
     <p id="message" role="status" aria-live="polite"></p>
     <section id="workspace" hidden>
       <div class="summary"><div><span id="credential-count">0</span><small>账号凭证</small></div><div><span id="limited-count">0</span><small>已设置上限</small></div><div><span id="inflight-count">0</span><small>已占用并发</small></div><button id="refresh" class="secondary">刷新数据</button><button id="disconnect" class="secondary">断开连接</button></div>
-      <aside>上限为 <strong>2</strong>，表示该账号最多同时处理 2 条请求。流式请求直到结束才释放名额。<strong>留空或填 0 表示不限制。</strong>每行单独保存，不会改变账号的启停状态。</aside>
+      <aside>上限为 <strong>2</strong>，表示该账号最多同时处理 2 条请求。流式请求直到结束才释放名额。<strong>留空或填 0 表示不限制。</strong>并发上限单独保存；启停开关点击后立即生效。</aside>
       <div class="toolbar"><h2>账号列表</h2><input id="search" type="search" aria-label="搜索账号" placeholder="搜索账号、文件名或供应商"></div>
       <div id="accounts" class="accounts"></div>
       <p class="hint">上限覆盖该账号的所有模型；修改后影响后续请求，已有请求不会被强行中断。此限制在当前 CPA 实例内生效。</p>

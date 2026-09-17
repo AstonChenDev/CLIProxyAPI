@@ -7,6 +7,7 @@
   let states = new Map();
   let maxLimit = 1000000;
   let connected = false;
+  let pendingUpdates = 0;
   const dirty = new Set();
   const message = (text, error = false) => { $('message').textContent = text; $('message').className = error ? 'error' : 'success'; };
   async function api(path, options = {}) {
@@ -58,17 +59,47 @@
       const main = el('div', 'account-main');
       const identity = el('div', 'identity');
       identity.append(el('h3', 'account-name', title), el('p', 'account-file', account.name || id));
-      identity.append(el('span', 'badge', account.provider || account.type || '凭证'), el('span', account.disabled ? 'badge disabled' : 'badge', account.disabled ? '已禁用' : '已启用'));
+      const stateBadge = el('span', account.disabled ? 'badge disabled' : 'badge', account.disabled ? '已停用' : '已启用');
+      identity.append(el('span', 'badge', account.provider || account.type || '凭证'), stateBadge);
+      const toggleWrap = el('div', 'credential-toggle');
+      const toggle = el('button', 'toggle'); toggle.type = 'button'; toggle.setAttribute('role', 'switch');
+      toggle.setAttribute('aria-label', '启用凭证 ' + title);
+      const toggleLabel = el('span', 'toggle-label');
+      const updateToggle = () => {
+        toggle.setAttribute('aria-checked', String(!account.disabled));
+        toggle.title = account.disabled ? '点击启用该凭证' : '点击停用该凭证';
+        toggleLabel.textContent = account.disabled ? '已停用' : '已启用';
+        stateBadge.className = account.disabled ? 'badge disabled' : 'badge';
+        stateBadge.textContent = toggleLabel.textContent;
+      };
+      updateToggle(); toggleWrap.append(toggle, toggleLabel); identity.append(toggleWrap);
       const count = el('div', 'count', '已占用 ' + (state?.admitted_in_flight || 0) + ' / ' + (policy.max_in_flight || '不限'));
       const limitWrap = el('div', 'limit');
       const input = el('input'); input.type = 'number'; input.min = '0'; input.max = String(maxLimit); input.step = '1'; input.placeholder = '不限'; input.value = policy.max_in_flight || ''; input.id = 'limit-' + id;
       const label = el('label', '', '账号总并发上限'); label.htmlFor = input.id; limitWrap.append(label, input);
       const save = el('button', '', '保存'); save.type = 'button'; save.setAttribute('aria-label', '保存 ' + title + ' 的并发设置');
       const status = el('div', 'row-status'); status.setAttribute('role', 'status');
+      const setRowBusy = busy => {
+        save.disabled = busy; input.disabled = busy; toggle.disabled = busy;
+        pendingUpdates += busy ? 1 : -1;
+        $('refresh').disabled = pendingUpdates > 0;
+        $('disconnect').disabled = pendingUpdates > 0;
+      };
+      toggle.addEventListener('click', async () => {
+        const disabled = !account.disabled;
+        setRowBusy(true); status.className = 'row-status'; status.textContent = disabled ? '正在停用…' : '正在启用…';
+        try {
+          const result = await api('auth-files/status', { method: 'PATCH', body: JSON.stringify({ name: id, auth_index: account.auth_index, disabled }) });
+          if (typeof result.disabled !== 'boolean') throw new Error('服务器未返回凭证状态，请刷新确认。');
+          account.disabled = result.disabled; updateToggle();
+          status.textContent = (account.disabled ? '已停用，不再调度新请求' : '已启用') + (dirty.has(id) ? ' · 并发修改尚未保存' : ' · ' + new Date().toLocaleTimeString());
+        } catch (error) { status.textContent = error.message; status.className = 'row-status error'; }
+        finally { setRowBusy(false); }
+      });
       const markDirty = () => { dirty.add(id); status.textContent = '未保存'; status.className = 'row-status'; };
       input.addEventListener('input', markDirty);
       save.addEventListener('click', async () => {
-        save.disabled = true; input.disabled = true; status.className = 'row-status'; status.textContent = '正在保存…';
+        setRowBusy(true); status.className = 'row-status'; status.textContent = '正在保存…';
         try {
           const body = { name: id, max_in_flight: parseLimit(input.value) };
           await api('auth-files/fields', { method: 'PATCH', body: JSON.stringify(body) });
@@ -77,7 +108,7 @@
           count.textContent = '已占用 ' + (state?.admitted_in_flight || 0) + ' / ' + (updated.max_in_flight || '不限');
           status.textContent = '已保存 · ' + new Date().toLocaleTimeString(); updateSummary();
         } catch (error) { status.textContent = error.message; status.className = 'row-status error'; }
-        finally { save.disabled = false; input.disabled = false; }
+        finally { setRowBusy(false); }
       });
       main.append(identity, count, limitWrap, save); row.append(main, status); $('accounts').append(row);
     }

@@ -4,6 +4,8 @@ Standalone CPA supports an optional `max_in_flight` integer in each persisted cr
 
 Open `/credential-concurrency.html` or use the shortcut in the existing `/management.html` panel. Sign in with the existing management key, edit a credential's limit, and save that row. The page never stores the management key in browser storage. Credential enablement, priority, model aliases, image generation, and image storage keep their existing behavior.
 
+Each credential also has an enable/disable switch. It uses the existing `PATCH /v0/management/auth-files/status` endpoint and takes effect immediately after a successful response. The switch preserves both the saved concurrency limit and any unsaved limit input. Status and limit updates for the same row are serialized.
+
 The existing authenticated management API also accepts:
 
 ```http

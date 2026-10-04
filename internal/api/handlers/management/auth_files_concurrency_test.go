@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	fileauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	fileauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestAuthFileConcurrencyPersistenceAndValidation(t *testing.T) {
@@ -29,7 +29,7 @@ func TestAuthFileConcurrencyPersistenceAndValidation(t *testing.T) {
 	patch := func(body string) *httptest.ResponseRecorder {
 		r := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(r)
-		c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+		c.Request = httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(body))
 		h.PatchAuthFileFields(c)
 		return r
 	}
@@ -57,7 +57,7 @@ func TestAuthFileConcurrencyPersistenceAndValidation(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v8/management/credentials", nil)
 	h.ListAuthFiles(c)
 	var listing struct {
 		Files []struct {

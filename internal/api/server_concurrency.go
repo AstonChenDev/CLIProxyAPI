@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
 )
 
 func (s *Server) serveCredentialConcurrency(c *gin.Context) {

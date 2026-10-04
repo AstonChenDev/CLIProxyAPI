@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // MaxInFlightMetadataKey is the persisted per-credential limit for standalone CPA.
@@ -176,14 +176,9 @@ func trackLocalUpstreamStream(ctx context.Context, stream *cliproxyexecutor.Stre
 		defer close(out)
 		defer lease.releaseRef()
 		for chunk := range stream.Chunks {
-			select {
-			case out <- chunk:
-			case <-ctx.Done():
-				// Drain without releasing admission until upstream acknowledges cancellation.
-				for range stream.Chunks {
-				}
-				return
-			}
+			// Existing stream consumers drain after cancellation and still need
+			// terminal errors for result accounting. Keep admission until they drain.
+			out <- chunk
 		}
 	}()
 	if executionErr != nil {

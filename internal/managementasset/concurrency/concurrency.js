@@ -11,7 +11,7 @@
   const dirty = new Set();
   const message = (text, error = false) => { $('message').textContent = text; $('message').className = error ? 'error' : 'success'; };
   async function api(path, options = {}) {
-    const response = await fetch('/v0/management/' + path, { ...options, cache: 'no-store', headers: { 'X-Management-Key': key, 'Content-Type': 'application/json' } });
+    const response = await fetch('/v8/management/' + path, { ...options, cache: 'no-store', headers: { 'X-Management-Key': key, 'Content-Type': 'application/json' } });
     const text = await response.text();
     let data;
     try { data = JSON.parse(text); } catch { throw new Error('服务返回了非 JSON 响应，请检查连接。'); }
@@ -31,7 +31,7 @@
     $('inflight-count').textContent = accounts.reduce((sum, a) => sum + (states.get(idOf(a))?.admitted_in_flight || 0), 0);
   }
   async function load() {
-    const auths = await api('auth-files');
+    const auths = await api('credentials');
     accounts = (auths.files || []).filter(a => idOf(a) && !a.runtime_only);
     if (accounts.some(a => !Object.hasOwn(a, 'max_in_flight'))) throw new Error('当前 CPA 尚未支持凭证并发限制，请升级服务后重试。');
     policies = new Map(accounts.map(a => [idOf(a), { max_in_flight: a.max_in_flight || 0 }]));
@@ -89,7 +89,7 @@
         const disabled = !account.disabled;
         setRowBusy(true); status.className = 'row-status'; status.textContent = disabled ? '正在停用…' : '正在启用…';
         try {
-          const result = await api('auth-files/status', { method: 'PATCH', body: JSON.stringify({ name: id, auth_index: account.auth_index, disabled }) });
+          const result = await api('credentials/status', { method: 'PATCH', body: JSON.stringify({ name: id, auth_index: account.auth_index, disabled }) });
           if (typeof result.disabled !== 'boolean') throw new Error('服务器未返回凭证状态，请刷新确认。');
           account.disabled = result.disabled; updateToggle();
           status.textContent = (account.disabled ? '已停用，不再调度新请求' : '已启用') + (dirty.has(id) ? ' · 并发修改尚未保存' : ' · ' + new Date().toLocaleTimeString());
@@ -102,7 +102,7 @@
         setRowBusy(true); status.className = 'row-status'; status.textContent = '正在保存…';
         try {
           const body = { name: id, max_in_flight: parseLimit(input.value) };
-          await api('auth-files/fields', { method: 'PATCH', body: JSON.stringify(body) });
+          await api('credentials/fields', { method: 'PATCH', body: JSON.stringify(body) });
           const updated = { max_in_flight: body.max_in_flight || 0 };
           policies.set(id, updated); dirty.delete(id); input.value = updated.max_in_flight || '';
           count.textContent = '已占用 ' + (state?.admitted_in_flight || 0) + ' / ' + (updated.max_in_flight || '不限');

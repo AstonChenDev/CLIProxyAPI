@@ -1,6 +1,12 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestImageStorageApplyEnvironmentOverridesMatchesChatGPT2API(t *testing.T) {
 	t.Setenv("CHATGPT2API_IMAGE_STORAGE_ENABLED", "true")
@@ -35,5 +41,45 @@ func TestImageStorageValidateRejectsIncompleteCOSConfig(t *testing.T) {
 	got := ImageStorageConfig{Enabled: true, Mode: "cos"}
 	if err := got.Validate(); err == nil {
 		t.Fatal("Validate() accepted incomplete COS configuration")
+	}
+}
+
+func TestImageStorageV8MigrationAndSavePreserveCOSSettings(t *testing.T) {
+	legacy := []byte("port: 8317\nimage-storage:\n  enabled: true\n  mode: cos\n  cos-secret-id: test-id\n  cos-secret-key: test-secret\n  cos-region: ap-beijing\n  cos-bucket: test-bucket\n  cos-path-prefix: generated\n  public-base-url: https://cdn.example.test\n")
+	cfg, err := ParseConfigBytes(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err = os.WriteFile(path, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Debug = true
+	if err = SaveConfigPreserveComments(path, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = ValidateV8Config(saved); err != nil {
+		t.Fatalf("migrated image storage is not valid v8 config: %v", err)
+	}
+	if !strings.Contains(string(saved), "multimedia:") || !strings.Contains(string(saved), "  image-storage:") {
+		t.Fatalf("image storage did not migrate under multimedia: %s", saved)
+	}
+	reloaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.ImageStorage != cfg.ImageStorage || !reloaded.Debug {
+		t.Fatal("v8 config save lost COS settings or the edited setting")
+	}
+	public, err := json.Marshal(reloaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(public), "test-secret") || strings.Contains(string(public), "test-id") {
+		t.Fatal("JSON configuration exposed COS credentials")
 	}
 }

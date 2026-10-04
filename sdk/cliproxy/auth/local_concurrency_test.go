@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type localLimitExecutor struct {
@@ -266,6 +266,20 @@ func TestLocalConcurrencyInvalidMetadataAndRefresh(t *testing.T) {
 	}
 	if m.LocalConcurrency(ids[0]).MaxInFlight != 5 {
 		t.Fatal("token refresh replaced the newer concurrency policy")
+	}
+}
+
+func TestLocalConcurrencyRequiredPersistenceReportsStoreFailure(t *testing.T) {
+	m := NewManager(&persistFailureStore{}, nil, nil)
+	auth := &Auth{ID: "concurrency-save-failure", Provider: "claude", Metadata: map[string]any{MaxInFlightMetadataKey: int64(2)}}
+	if _, errRegister := m.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	if _, errUpdate := m.Update(WithRequiredPersist(context.Background()), auth); errUpdate == nil {
+		t.Fatal("saving an explicit concurrency policy hid a persistence failure")
+	}
+	if _, errUpdate := m.UpdateRefreshedAuth(context.Background(), auth, auth.Clone()); errUpdate != nil {
+		t.Fatalf("token refresh must retain non-fatal persistence behavior: %v", errUpdate)
 	}
 }
 
